@@ -191,10 +191,6 @@ class SoundPadUI(QtWidgets.QMainWindow):
         self.add_btn.clicked.connect(self.add_sound)
         top.addWidget(self.add_btn)
 
-        self.add_url_btn = QtWidgets.QPushButton('Adicionar via URL')
-        self.add_url_btn.clicked.connect(self.add_sound_from_url)
-        top.addWidget(self.add_url_btn)
-
         self.sort_combo = QtWidgets.QComboBox()
         self.sort_combo.addItems(['Tempo: Antigo→Novo','Alfabética', 'Mais usados'])
         self.sort_combo.currentIndexChanged.connect(self.apply_sort)
@@ -368,20 +364,6 @@ class SoundPadUI(QtWidgets.QMainWindow):
         entry = self.manager.add_sound(fn)
         self.refresh_sound_list()
         self.status.setText(f'Adicionado {entry.name}')
-
-    def add_sound_from_url(self):
-        url, ok = QtWidgets.QInputDialog.getText(self, 'Adicionar via URL', 'Cole a URL (http/https or YouTube):')
-        if not ok or not url:
-            return
-        self.status.setText('Baixando...')
-        QtWidgets.QApplication.processEvents()
-        path = self.download_url_to_file(url)
-        if path:
-            entry = self.manager.add_sound(path)
-            self.refresh_sound_list()
-            self.status.setText(f'Adicionado {entry.name} (via URL)')
-        else:
-            self.status.setText('Falha no download')
 
     def download_url_to_file(self, url) -> Optional[str]:
         try:
