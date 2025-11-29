@@ -25,54 +25,6 @@ os.makedirs(APP_DIR, exist_ok=True)
 SOUNDS_DB = os.path.join(APP_DIR, 'sounds.json')
 DEFAULT_SAMPLE_RATE = 48000
 
-class Player:
-    def __init__(self):
-        self.p = pyaudio.PyAudio()
-        self.stream = None
-        self.playing = False
-
-    def play(self, path):
-        if self.playing:
-            self.stop()
-
-        self.playing = True
-
-        def worker():
-            wf = wave.open(path, "rb")
-            self.stream = self.p.open(
-                format=self.p.get_format_from_width(wf.getsampwidth()),
-                channels=wf.getnchannels(),
-                rate=wf.getframerate(),
-                output=True)
-            chunk = 1024
-            data = wf.readframes(chunk)
-
-            while data and self.playing:
-                try:
-                    self.stream.write(data)
-                except OSError:
-                    break
-                data = wf.readframes(chunk)
-
-            self._cleanup()
-        threading.Thread(target=worker, daemon=True).start()
-
-    def stop(self):
-        self.playing = False
-
-    def _cleanup(self):
-        try:
-            if self.stream and self.stream.is_active():
-                self.stream.stop_stream()
-            if self.stream:
-                self.stream.close()
-        except Exception:
-            pass
-
-        self.stream = None
-
-
-
 @dataclass
 class SoundEntry:
     id: str
@@ -174,6 +126,10 @@ class SoundPadUI(QtWidgets.QMainWindow):
         self.master_volume = 1.0
         self.current_streams: List[Any] = []  # Objetos OutputStream ativos no momento
 
+        # sincronização / sinal de parada
+        self.current_streams_lock = threading.Lock()
+        self.stop_event = threading.Event()
+
         self.init_ui()
         self.populate_devices()
         self.refresh_sound_list()
@@ -206,7 +162,7 @@ class SoundPadUI(QtWidgets.QMainWindow):
         self.master_slider.setFixedWidth(180)
         top.addWidget(self.master_slider)
 
-        self.monitor_checkbox = QtWidgets.QCheckBox('Monitorar localmente em double-click/hotkey')
+        self.monitor_checkbox = QtWidgets.QCheckBox('Ativar com Double-Click e Hotkey')
         self.monitor_checkbox.setChecked(True)
         top.addWidget(self.monitor_checkbox)
 
@@ -402,6 +358,7 @@ class SoundPadUI(QtWidgets.QMainWindow):
             return None
 
     def on_master_volume(self, v):
+        # master slider usa 0..100 -> 0.0..1.0
         self.master_volume = v / 100.0
 
     def on_selection_changed(self):
@@ -467,7 +424,8 @@ class SoundPadUI(QtWidgets.QMainWindow):
             has_none = any(d is None for d in dev_idxs)
             if not has_none:
                 dev_idxs = list(dev_idxs) + [None]
-        self.player.enqueue(self.play_to_devices, s.path, s.volume * self.master_volume, dev_idxs)
+        # Passamos volume individual; play_to_devices aplicará também self.master_volume
+        self.player.enqueue(self.play_to_devices, s.path, s.volume, dev_idxs)
         s.usage_count += 1
         self.manager.save()
 
@@ -496,7 +454,7 @@ class SoundPadUI(QtWidgets.QMainWindow):
                     dev_idxs = list(dev_idxs) + [None]
             except Exception:
                 dev_idxs = list(dev_idxs) + [None]
-        self.player.enqueue(self.play_to_devices, s.path, s.volume * self.master_volume, dev_idxs)
+        self.player.enqueue(self.play_to_devices, s.path, s.volume, dev_idxs)
         s.usage_count += 1
         self.manager.save()
 
@@ -509,24 +467,16 @@ class SoundPadUI(QtWidgets.QMainWindow):
             dev_idxs = [default_dev[1]] if isinstance(default_dev, (list, tuple)) else [None]
         except:
             dev_idxs = [None]
-        self.player.enqueue(self.play_to_devices, s.path, s.volume * self.master_volume, dev_idxs)
+        self.player.enqueue(self.play_to_devices, s.path, s.volume, dev_idxs)
 
     def on_stop(self):
-        try:
-            for st in list(self.current_streams):
-                try:
-                    st.stop()
-                    st.close()
-                except Exception:
-                    pass
-            self.current_streams = []
-        except Exception:
-            self.current_streams = []
-        # Também chama "sd.stop" quando ocorrer fallback
-        try:
-            sd.stop()
-        except Exception:
-            pass
+        """
+        NÃO pare/feche streams aqui. Só sinalize que a reprodução deve parar.
+        A própria função play_to_devices (rodando no PlayerThread) vai detectar o evento
+        e fechar os streams de maneira segura (na mesma thread que os criou).
+        """
+        self.stop_event.set()
+        # Não chamar st.stop() ou st.close() aqui - evita crash nativo.
 
     def on_rename(self):
         s = self.get_selected_sound()
@@ -545,22 +495,35 @@ class SoundPadUI(QtWidgets.QMainWindow):
         self.refresh_sound_list()
 
     ##### Núcleo de reprodução com suporte a "m4a" e interrupção #####
-    def play_to_devices(self, filepath, volume, device_idxs):
-        # Para quaisquer sons ativos:
-        try:
-            for st in list(self.current_streams):
-                try:
-                    st.stop()
-                    st.close()
-                except Exception:
-                    pass
+    def play_to_devices(self, filepath, volume_individual, device_idxs):
+        """
+        volume_individual: 0.0..1.0 (o slider do som)
+        Aplicamos também self.master_volume (0.0..1.0) ao tocar.
+        """
+
+        # limpa pedido anterior de parada
+        self.stop_event.clear()
+
+        # Fecha streams antigos (SE existirem) — feito no PlayerThread (seguro)
+        with self.current_streams_lock:
+            prev_streams = list(self.current_streams)
             self.current_streams = []
-        except Exception:
-            self.current_streams = []
+        for st in prev_streams:
+            try:
+                st.stop()
+            except Exception:
+                pass
+            try:
+                st.close()
+            except Exception:
+                pass
 
         # Lê arquivos (soundfile se possível; fallback para pydub para formatos "m4a/mp3/webm")
+        data = None
+        sr = None
         try:
             data, sr = sf.read(filepath, dtype='float32')
+            # sf.read com dtype='float32' geralmente retorna float32 em -1..1
             if data.ndim == 1:
                 data = np.column_stack((data, data))
         except Exception:
@@ -570,16 +533,23 @@ class SoundPadUI(QtWidgets.QMainWindow):
             try:
                 audio = AudioSegment.from_file(filepath)
                 audio = audio.set_frame_rate(DEFAULT_SAMPLE_RATE).set_channels(2)
-                audio = audio.normalize()
+                # extrai samples e normaliza para float32 em -1..1
                 samples = np.array(audio.get_array_of_samples())
                 samples = samples.astype(np.float32)
-                channels = audio.channels
-                samples = samples.reshape((-1, channels))
-                if audio.sample_width == 2:
+                # sample_width em bytes (1,2,4). normalizar conforme largura
+                if audio.sample_width == 1:
+                    # 8-bit unsigned PCM in pydub -> shift to signed
+                    samples = (samples - 128.0) / 128.0
+                elif audio.sample_width == 2:
                     samples = samples / (2**15)
                 elif audio.sample_width == 4:
                     samples = samples / (2**31)
-                data = samples
+                else:
+                    # fallback: tente dividir por 2^(8*sample_width -1)
+                    samples = samples / float(2**(8*audio.sample_width - 1))
+                channels = audio.channels
+                samples = samples.reshape((-1, channels))
+                data = samples.astype(np.float32)
                 sr = audio.frame_rate
                 if data.ndim == 1:
                     data = np.column_stack((data, data))
@@ -587,8 +557,14 @@ class SoundPadUI(QtWidgets.QMainWindow):
                 print("Erro ao decodificar via pydub:", e)
                 return
 
-        # Volume geral
-        data = data * float(volume)
+        # Se nada carregado, aborta
+        if data is None or sr is None:
+            print('Não foi possível carregar o arquivo:', filepath)
+            return
+
+        # Calcula ganho final
+        # volume_individual é 0..1 (por som), self.master_volume é 0..1
+        gain = float(volume_individual) * float(self.master_volume)
 
         streams = []
         try:
@@ -602,13 +578,12 @@ class SoundPadUI(QtWidgets.QMainWindow):
                     continue
                 try:
                     stream = sd.OutputStream(
-                    samplerate=sr,
-                    device=dev_index,
-                    channels=data.shape[1],
-                    dtype='float32',
-                    blocksize=2048,
-                    latency='high')
-                    
+                        samplerate=sr,
+                        device=dev_index,
+                        channels=data.shape[1],
+                        dtype='float32',
+                        blocksize=2048,
+                        latency='high')
                     stream.start()
                     streams.append(stream)
                 except Exception as e:
@@ -616,9 +591,14 @@ class SoundPadUI(QtWidgets.QMainWindow):
                     continue
 
             if not streams:
+                # fallback global (usa sd.play) — aplicamos ganho e clip antes
                 if any(d is None for d in device_idxs):
                     try:
-                        sd.play(data, sr)
+                        # aplicar ganho e clip:
+                        to_play = data * gain
+                        # garantir float32 e no range [-1,1]
+                        to_play = np.clip(to_play, -1.0, 1.0).astype(np.float32)
+                        sd.play(to_play, sr)
                         sd.wait()
                         return
                     except Exception as e:
@@ -628,35 +608,58 @@ class SoundPadUI(QtWidgets.QMainWindow):
                     print('Nenhum fluxo reproduzível disponível para dispositivos:', device_idxs)
                     return
 
-            self.current_streams = streams
+            # Registra streams de forma segura
+            with self.current_streams_lock:
+                self.current_streams = streams
 
             block = 1024
             idx = 0
             n = data.shape[0]
+            write_error_printed = False
             while idx < n:
+                # Se foi pedido para parar, sai do loop (a finalização fechará os streams)
+                if self.stop_event.is_set():
+                    break
+
                 to = min(idx + block, n)
                 chunk = data[idx:to]
-                if self.current_streams is not streams:
-                    break
+
+                # garante float32
+                if chunk.dtype != np.float32:
+                    chunk = chunk.astype(np.float32)
+
+                # aplica ganho e evita clipping
+                out_chunk = chunk * gain
+                out_chunk = np.clip(out_chunk, -1.0, 1.0).astype(np.float32)
+
                 for st in streams:
                     try:
-                        st.write(chunk)
+                        st.write(out_chunk)
                     except Exception as e:
-                        print('Stream write error:', e)
+                        if not write_error_printed:
+                            print('Stream write error:', e)
+                            write_error_printed = True
+                        # não abortar todo o processo aqui; continue e feche depois
                 idx = to
 
         except Exception as e:
             print('Playback error', e)
         finally:
-            # Fecha streams se ainda estiverem ativos
+            # Fecha streams se ainda estiverem ativos (executado no PlayerThread)
             for st in streams:
                 try:
                     st.stop()
+                except Exception:
+                    pass
+                try:
                     st.close()
                 except Exception:
                     pass
-            if self.current_streams is streams:
-                self.current_streams = []
+            with self.current_streams_lock:
+                if self.current_streams is streams:
+                    self.current_streams = []
+            # limpando pedido de parada (pronto para próxima reprodução)
+            self.stop_event.clear()
 
     def play_file(self, filepath, volume):
         try:
@@ -671,34 +674,34 @@ class SoundPadUI(QtWidgets.QMainWindow):
                 audio = AudioSegment.from_file(filepath)
                 audio = audio.set_frame_rate(DEFAULT_SAMPLE_RATE).set_channels(2)
                 samples = np.array(audio.get_array_of_samples()).astype(np.float32)
-                samples = samples.reshape((-1, audio.channels))
-                if audio.sample_width == 2:
+                if audio.sample_width == 1:
+                    samples = (samples - 128.0) / 128.0
+                elif audio.sample_width == 2:
                     samples = samples / (2**15)
                 elif audio.sample_width == 4:
                     samples = samples / (2**31)
+                samples = samples.reshape((-1, audio.channels))
                 data = samples
                 sr = audio.frame_rate
             except Exception as e:
                 print("Erro ao decodificar via pydub:", e)
                 return
 
-        data = data * float(volume)
+        # aplica volume final com master
+        gain = float(volume) * float(self.master_volume)
+        to_play = np.clip(data * gain, -1.0, 1.0).astype(np.float32)
         try:
-            sd.play(data, sr)
+            sd.play(to_play, sr)
             sd.wait()
         except Exception as e:
             print('sd.play failed:', e)
 
-    # Duplo clique/atalho = handle_play_for_sound
-
     def closeEvent(self, event):
+        # sinaliza parada (play_to_devices fará o fechamento)
+        self.stop_event.set()
+        # enfileira uma tarefa nula para "acordar" o player thread (opcional)
         try:
-            for st in list(self.current_streams):
-                try:
-                    st.stop()
-                    st.close()
-                except Exception:
-                    pass
+            self.player.enqueue(lambda: None)
         except Exception:
             pass
         if keyboard is not None:
@@ -706,6 +709,7 @@ class SoundPadUI(QtWidgets.QMainWindow):
                 keyboard.unhook_all()
             except Exception:
                 pass
+        # finalize o player thread
         self.player.stop()
         event.accept()
 

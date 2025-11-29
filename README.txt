@@ -59,3 +59,7 @@ Agora:
      5. Abra o Painel de Controle, e pesquise por "Variáveis de Ambiente".
      6. Procure pela variável Path, clique em Editar e adicione o caminho que você copiou.
      7. Confirme tudo, reinicie o programa e teste.
+
+- Se os áudios não estão saindo corretamente no Discord ou softwares semelhantes, pode fazer o seguinte:
+     1. Deixe o perfil de entrada no modo "Personalizado" e deixe a barra da "Sensibilidade de entrada" como "-100dB" ou totalmente da cor verde.
+     2. No "Processamento de voz", na "Supressão de Ruído", deixe o modo como "Nenhum".
