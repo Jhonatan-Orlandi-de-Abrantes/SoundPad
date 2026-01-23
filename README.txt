@@ -31,8 +31,8 @@ Dispositivo de entrada     CABLE In (VB-Audio Virtual)
 4️⃣ Configure no VoiceMeeter
 
 - No VoiceMeeter Banana:
-     Stereo Inputs     |         Configuração
-Stereo Input 1	                (Seu microfone)
+      Stereo Inputs      |         Configuração
+Stereo Input 1	                   (Seu microfone)
 Stereo Input 2              "CABLE Input" ou "CABLE Output"
 
 5️⃣ Configure o SoundPad
@@ -53,11 +53,9 @@ Agora:
 !!! Observações: !!!
 - Se o programa travar e fechar sozinho, é porque o "ffmpeg" não foi encontrado, como resolver:
      1. Instale o "ffmpeg" no link: https://www.gyan.dev/ffmpeg/builds/
-     2. Após extrair, abra e execute na pasta: "...\ffmpeg\bin\ffmpeg.exe"
-     4. Copie o caminho da pasta "bin", como: "...\ffmpeg\bin\"
-     5. Abra o Painel de Controle, e pesquise por "Variáveis de Ambiente".
-     6. Procure pela variável Path, clique em Editar e adicione o caminho que você copiou.
-     7. Confirme tudo, reinicie o programa e teste.
+     2. Após extrair, renomeie a pasta anterior a pasta "bin" como "ffmpeg".
+     4. O caminho deve ficar "ffmpeg\bin".
+     5. Mova essa pasta "ffmpeg" para o mesmo local que está o "soundpad.exe".
 
 - Se os áudios não estão saindo corretamente no Discord ou softwares semelhantes, pode fazer o seguinte:
      1. Deixe o perfil de entrada no modo "Personalizado" e deixe a barra da "Sensibilidade de entrada" como "-100dB" ou totalmente da cor verde.
